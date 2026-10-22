@@ -465,8 +465,9 @@ local function tryQueue()
     local main = mainFrame()
     -- After a match, leave the results screen so the known-working lobby
     -- queue path can handle the configured mode.
-    local pages = main and main:FindFirstChild("Pages")
-    local results = pages and pages:FindFirstChild("FinalResults")
+    local duelInterfaces = main and main:FindFirstChild("DuelInterfaces")
+    local duelInterface = duelInterfaces and duelInterfaces:FindFirstChild("DuelInterface")
+    local results = duelInterface and duelInterface:FindFirstChild("FinalResults")
     local resultButtons = results and results:FindFirstChild("Buttons")
     local bottomRight = resultButtons and resultButtons:FindFirstChild("BottomRight")
     local container = bottomRight and bottomRight:FindFirstChild("Container")
@@ -478,7 +479,14 @@ local function tryQueue()
         lobbyReadySince = nil
         if os.clock() - lastSkipAttempt >= 3 then
             lastSkipAttempt = os.clock()
-            setStatus(click(leaveButton) and "Skip pressed" or "Could not press Skip")
+            local clicked = click(leaveButton)
+            setStatus(clicked and "Skip pressed" or "Could not press Skip")
+            if clicked then
+                task.delay(1.5, function()
+                    if app.running and leaveButton.Parent and shown(leaveButton)
+                        and leaveTitle.Text == "Skip" then click(leaveButton, true) end
+                end)
+            end
         end
         return
     end
@@ -488,7 +496,15 @@ local function tryQueue()
         lobbyReadySince = nil
         if os.clock() - lastExitAttempt >= 5 then
             lastExitAttempt = os.clock()
-            setStatus(click(leaveButton) and "Exit pressed; returning to lobby" or "Could not press Exit")
+            local caption = leaveTitle.Text
+            local clicked = click(leaveButton)
+            setStatus(clicked and "Leave pressed; returning to lobby" or "Could not press Leave")
+            if clicked then
+                task.delay(1.5, function()
+                    if app.running and leaveButton.Parent and shown(leaveButton)
+                        and leaveTitle.Text == caption then click(leaveButton, true) end
+                end)
+            end
         end
         return
     end
