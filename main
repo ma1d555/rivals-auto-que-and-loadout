@@ -445,28 +445,39 @@ end
 
 local lastQueueAttempt = -math.huge
 local lastSkipAttempt = -math.huge
+local lastExitAttempt = -math.huge
 local lobbyReadySince
 local lastDuelLibraryAttempt = -math.huge
 local queuesBuilt = false
 local function tryQueue()
     if not app.autoQueue then lobbyReadySince = nil; return end
     local main = mainFrame()
-    -- The lobby Play button is not shown after a match. Use the game's own
-    -- Play Again button when final results are on screen instead.
+    -- After a match, leave the results screen so the known-working lobby
+    -- queue path can handle the configured mode.
     local pages = main and main:FindFirstChild("Pages")
     local results = pages and pages:FindFirstChild("FinalResults")
     local resultButtons = results and results:FindFirstChild("Buttons")
     local bottomRight = resultButtons and resultButtons:FindFirstChild("BottomRight")
     local container = bottomRight and bottomRight:FindFirstChild("Container")
     local leave = container and container:FindFirstChild("Leave")
-    local skipButton = leave and leave:FindFirstChild("Button")
-    local skipTitle = skipButton and skipButton:FindFirstChild("Title")
-    if skipButton and skipTitle and skipTitle.Text == "Skip"
-        and shown(skipButton) and skipButton.AbsoluteSize.X > 0 then
+    local leaveButton = leave and leave:FindFirstChild("Button")
+    local leaveTitle = leaveButton and leaveButton:FindFirstChild("Title")
+    if leaveButton and leaveTitle and shown(leaveButton) and leaveButton.AbsoluteSize.X > 0
+        and leaveTitle.Text == "Skip" then
         lobbyReadySince = nil
         if os.clock() - lastSkipAttempt >= 3 then
             lastSkipAttempt = os.clock()
-            setStatus(click(skipButton) and "Skip pressed" or "Could not press Skip")
+            setStatus(click(leaveButton) and "Skip pressed" or "Could not press Skip")
+        end
+        return
+    end
+    if leaveButton and leaveTitle and shown(leaveButton) and leaveButton.AbsoluteSize.X > 0
+        and (leaveTitle.Text == "Exit" or leaveTitle.Text == "Leave"
+            or leaveTitle.Text == "To Hub" or leaveTitle.Text == "Back to Hub") then
+        lobbyReadySince = nil
+        if os.clock() - lastExitAttempt >= 5 then
+            lastExitAttempt = os.clock()
+            setStatus(click(leaveButton) and "Exit pressed; returning to lobby" or "Could not press Exit")
         end
         return
     end
@@ -478,13 +489,13 @@ local function tryQueue()
             lastQueueAttempt = os.clock()
             local remotes = ReplicatedStorage:FindFirstChild("Remotes")
             local matchRemotes = remotes and remotes:FindFirstChild("Matchmaking")
-            local playAgainRemote = matchRemotes and matchRemotes:FindFirstChild("PlayAgain")
-            if not playAgainRemote or not playAgainRemote:IsA("RemoteEvent") then
-                setStatus("Play Again remote unavailable")
+            local backToHub = matchRemotes and matchRemotes:FindFirstChild("BackToHub")
+            if not backToHub or not backToHub:IsA("RemoteEvent") then
+                setStatus("Back-to-hub remote unavailable")
                 return
             end
-            local ok = pcall(function() playAgainRemote:FireServer() end)
-            setStatus(ok and "Play Again sent; waiting for queue" or "Play Again remote failed")
+            local ok = pcall(function() backToHub:FireServer() end)
+            setStatus(ok and "Returning to lobby" or "Back-to-hub remote failed")
         end
         return
     end
@@ -544,3 +555,4 @@ if queueSelectionError then
 else
     setStatus("Waiting for lobby or weapon picker")
 end
+
