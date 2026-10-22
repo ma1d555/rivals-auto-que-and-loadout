@@ -1,0 +1,509 @@
+-- Standalone Rivals auto-queue + auto-loadout. Run once per client; rerunning replaces it.
+local env = getgenv()
+if env.RivalsQueueLoadout and env.RivalsQueueLoadout.Stop then
+    pcall(function() env.RivalsQueueLoadout:Stop() end)
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local playerScripts = player:WaitForChild("PlayerScripts")
+
+local config = type(env.RivalsQueueLoadoutConfig) == "table" and env.RivalsQueueLoadoutConfig or {}
+local app = {
+    running = true,
+    connections = {},
+    autoQueue = config.AutoQueue ~= false,
+    autoLoadout = config.AutoLoadout ~= false,
+}
+env.RivalsQueueLoadout = app
+local selected = { Primary = "Assault Rifle", Secondary = "Handgun", Melee = "Fists", Utility = "Grenade" }
+local classes = { "Primary", "Secondary", "Melee", "Utility" }
+for _, class in ipairs(classes) do
+    if type(config[class]) == "string" and config[class] ~= "" then selected[class] = config[class] end
+end
+-- Base weapon names from SkinChanger.lua's weapon-to-skins table. Skin names are not loadout items.
+local sourceWeapons = {
+    ["Assault Rifle"] = true, Bow = true, ["Burst Rifle"] = true, Chainsaw = true,
+    RPG = true, Exogun = true, Fists = true, Flamethrower = true,
+    ["Flare Gun"] = true, ["Freeze Ray"] = true, Grenade = true,
+    ["Grenade Launcher"] = true, Handgun = true, Katana = true, Minigun = true,
+    ["Paintball Gun"] = true, Revolver = true, Slingshot = true,
+    ["Subspace Tripmine"] = true, Uzi = true, Sniper = true, Knife = true,
+    Shotgun = true, Crossbow = true, Daggers = true, Distortion = true,
+    ["Energy Rifle"] = true, ["Energy Pistols"] = true, Gunblade = true,
+    ["Battle Axe"] = true, ["Riot Shield"] = true, Scythe = true, Trowel = true,
+    Medkit = true, Molotov = true, Satchel = true, ["Smoke Grenade"] = true,
+    ["War Horn"] = true, Warpstone = true, Flashbang = true,
+    ["Jump Pad"] = true, Warper = true, Wildcat = true,
+}
+
+local function connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(app.connections, connection)
+    return connection
+end
+
+local function safeRequire(module)
+    if not module then return nil end
+    local ok, result = pcall(require, module)
+    return ok and result or nil
+end
+
+-- Never require game modules while its own interface is still starting up.
+local itemLibrary, duelLibrary, matchmaking
+local function gameModule(name)
+    local folder = ReplicatedStorage:FindFirstChild("Modules")
+    return folder and folder:FindFirstChild(name)
+end
+local function gameController(name)
+    local folder = playerScripts:FindFirstChild("Controllers")
+    return folder and folder:FindFirstChild(name)
+end
+
+local function weaponOptions(class)
+    local names = {}
+    for name, item in pairs(itemLibrary and itemLibrary.Items or {}) do
+        if sourceWeapons[name] and type(item) == "table" and item.Class == class then
+            table.insert(names, name)
+        end
+    end
+    table.sort(names)
+    return names
+end
+
+local requestedMode = type(config.Queue) == "string" and config.Queue:lower() or "1s"
+local queueSelectionError
+if not requestedMode:match("^[1-5]s$") then
+    queueSelectionError = "Queue must be 1s, 2s, 3s, 4s, or 5s"
+end
+
+-- Translate simple mode names to the game's current internal matchmaking queue names.
+-- Only use queues actually listed by DuelLibrary, and avoid ranked/three-team variants.
+local queues = {}
+local queueIndex
+local function buildQueues()
+    queues = {}
+    for size = 1, 5 do
+        local mode = tostring(size) .. "s"
+        local versus = tostring(size) .. "v" .. tostring(size)
+        local best, bestScore
+        for name, info in pairs(duelLibrary and duelLibrary.MatchmakingQueues or {}) do
+            local label = tostring(info.DisplayName or name)
+            local value = (name .. " " .. label):lower()
+            local ranked = value:find("ranked", 1, true) and not value:find("unranked", 1, true)
+            if value:find(versus, 1, true) and not value:find(versus .. "v", 1, true) and not ranked then
+                local score = 0
+                if name:lower() == versus or label:lower() == versus then score = score + 100 end
+                if value:find("unranked", 1, true) then score = score + 20 end
+                if value:find("beginner", 1, true) then score = score - 50 end
+                if not best or score > bestScore then
+                    best, bestScore = { mode = mode, name = name, label = label }, score
+                end
+            end
+        end
+        if best then table.insert(queues, best) end
+    end
+    queueIndex = nil
+    if not queueSelectionError then
+        for i, queue in ipairs(queues) do
+            if queue.mode == requestedMode then queueIndex = i; break end
+        end
+        if not queueIndex then queueSelectionError = requestedMode .. " queue unavailable in this game" end
+    end
+end
+
+local function shown(object)
+    local node = object
+    while node and node:IsA("GuiObject") do
+        if not node.Visible then return false end
+        node = node.Parent
+    end
+    return node ~= nil and (not node:IsA("LayerCollector") or node.Enabled)
+end
+
+local function mainFrame()
+    local gui = playerGui:FindFirstChild("MainGui")
+    return gui and gui:FindFirstChild("MainFrame")
+end
+
+local function openPicker()
+    local main = mainFrame()
+    local pages = main and main:FindFirstChild("Pages")
+    if not pages then return nil end
+    local camera = workspace.CurrentCamera
+    local viewport = camera and camera.ViewportSize
+    if not viewport then return nil end
+    for _, name in ipairs({ "PickWeapons", "PickWeaponsList" }) do
+        local frame = pages:FindFirstChild(name)
+        if frame and shown(frame) then
+            local position, size = frame.AbsolutePosition, frame.AbsoluteSize
+            local onScreen = size.X > 0 and size.Y > 0 and position.X < viewport.X
+                and position.Y < viewport.Y and position.X + size.X > 0 and position.Y + size.Y > 0
+            local chosen = frame:FindFirstChild("ChosenWeapons")
+            local list = frame:FindFirstChild("List")
+            local container = list and list:FindFirstChild("Container")
+            local hasSlots, hasWeapons = false, false
+            for _, child in ipairs(chosen and chosen:GetChildren() or {}) do
+                if child:IsA("Frame") and child:FindFirstChild("Button") then hasSlots = true; break end
+            end
+            for _, child in ipairs(container and container:GetChildren() or {}) do
+                local button = child:FindFirstChild("Button")
+                if button and button:FindFirstChild("Title") then hasWeapons = true; break end
+            end
+            if onScreen and hasSlots and hasWeapons then return frame end
+        end
+    end
+end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "RivalsQueueLoadout"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = playerGui
+
+local panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.Size = UDim2.fromOffset(302, 306)
+panel.Position = UDim2.new(0, 18, 0.5, -153)
+panel.BackgroundColor3 = Color3.fromRGB(23, 25, 34)
+panel.BorderSizePixel = 0
+panel.Active = true
+panel.Draggable = true
+panel.Parent = gui
+Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+
+local function label(parent, text, size, position, fontSize, color)
+    local object = Instance.new("TextLabel")
+    object.BackgroundTransparency = 1
+    object.Text = text
+    object.Font = Enum.Font.Gotham
+    object.TextSize = fontSize or 14
+    object.TextColor3 = color or Color3.fromRGB(235, 238, 245)
+    object.TextXAlignment = Enum.TextXAlignment.Left
+    object.Size, object.Position = size, position
+    object.Parent = parent
+    return object
+end
+
+local function button(text, x, y, width, callback)
+    local object = Instance.new("TextButton")
+    object.Text = text
+    object.Font = Enum.Font.GothamMedium
+    object.TextSize = 13
+    object.TextColor3 = Color3.fromRGB(242, 244, 250)
+    object.BackgroundColor3 = Color3.fromRGB(46, 51, 67)
+    object.BorderSizePixel = 0
+    object.Size = UDim2.fromOffset(width, 28)
+    object.Position = UDim2.fromOffset(x, y)
+    object.Parent = panel
+    Instance.new("UICorner", object).CornerRadius = UDim.new(0, 6)
+    connect(object.MouseButton1Click, callback)
+    return object
+end
+
+label(panel, "Rivals • Queue + Loadout", UDim2.fromOffset(247, 30), UDim2.fromOffset(12, 7), 16)
+button("×", 265, 8, 27, function() app:Stop() end)
+local status = label(panel, "Ready", UDim2.fromOffset(280, 27), UDim2.fromOffset(12, 274), 12, Color3.fromRGB(180, 195, 215))
+local function setStatus(message)
+    if app.running then status.Text = message end
+end
+
+local queueToggle = button("", 12, 46, 135, function()
+    app.autoQueue = not app.autoQueue
+    app.refreshToggles()
+end)
+local loadoutToggle = button("", 155, 46, 135, function()
+    app.autoLoadout = not app.autoLoadout
+    app.refreshToggles()
+end)
+function app.refreshToggles()
+    queueToggle.Text = "Auto queue: " .. (app.autoQueue and "ON" or "OFF")
+    loadoutToggle.Text = "Auto loadout: " .. (app.autoLoadout and "ON" or "OFF")
+end
+app.refreshToggles()
+
+label(panel, "Queue", UDim2.fromOffset(75, 26), UDim2.fromOffset(12, 85), 13)
+local queueButton
+queueButton = button("", 87, 84, 203, function()
+    if #queues == 0 then return end
+    queueIndex = (queueIndex or 0) % #queues + 1
+    queueSelectionError = nil
+    queueButton.Text = queues[queueIndex].mode .. " (" .. queues[queueIndex].label .. ")  ›"
+    setStatus("Queue set to " .. queues[queueIndex].mode)
+end)
+queueButton.Text = queues[queueIndex]
+    and (queues[queueIndex].mode .. " (" .. queues[queueIndex].label .. ")  ›")
+    or (queueSelectionError and "Choose a mode  ›" or "No standard queues")
+
+local slotButtons = {}
+for i, class in ipairs(classes) do
+    local y = 118 + (i - 1) * 36
+    label(panel, class, UDim2.fromOffset(75, 27), UDim2.fromOffset(12, y), 13)
+    local slotButton
+    slotButton = button("", 87, y, 203, function()
+        local options = weaponOptions(class)
+        if #options == 0 then return end
+        local index = table.find(options, selected[class]) or 0
+        selected[class] = options[index % #options + 1]
+        slotButton.Text = selected[class] .. "  ›"
+    end)
+    slotButton.Text = selected[class] .. "  ›"
+    slotButtons[class] = slotButton
+end
+
+function app:Stop()
+    if not self.running then return end
+    self.running = false
+    for _, connection in ipairs(self.connections) do pcall(function() connection:Disconnect() end) end
+    gui:Destroy()
+    if env.RivalsQueueLoadout == self then env.RivalsQueueLoadout = nil end
+end
+
+local function resolveWeapon(name, class)
+    local items = itemLibrary and itemLibrary.Items
+    if not items then return nil, "weapon list not loaded" end
+    local item = items[name]
+    if sourceWeapons[name] and item and item.Class == class then return name end
+    -- Match the game's internal item name, not text from a skin or weapon tile.
+    for internalName, entry in pairs(items) do
+        if sourceWeapons[internalName] and entry.Class == class and internalName:lower() == name:lower() then
+            return internalName
+        end
+    end
+    return nil, name .. " not in the " .. class .. " weapon list"
+end
+
+local function chosenSlots(picker)
+    local slots = {}
+    local frame = picker:FindFirstChild("ChosenWeapons")
+    for _, child in ipairs(frame and frame:GetChildren() or {}) do
+        if child:IsA("Frame") and child:FindFirstChild("Button") then
+            table.insert(slots, child)
+        end
+    end
+    table.sort(slots, function(a, b) return a.LayoutOrder < b.LayoutOrder end)
+    return slots
+end
+
+local function weaponTile(picker, weapon)
+    local list = picker:FindFirstChild("List")
+    local container = list and list:FindFirstChild("Container")
+    for _, tile in ipairs(container and container:GetChildren() or {}) do
+        local button = tile:FindFirstChild("Button")
+        local title = button and button:FindFirstChild("Title")
+        local banned = button and button:FindFirstChild("Banned")
+        local locked = button and button:FindFirstChild("Locked")
+        if title and title:IsA("TextLabel") and title.Text == weapon and title.Visible
+            and (not banned or not banned.Visible) and (not locked or not locked.Visible) then
+            return button
+        end
+    end
+end
+
+local function click(button, physicalOnly)
+    if not button or not button.Parent then return false end
+    if not physicalOnly and getconnections then
+        local ok, connections = pcall(getconnections, button.MouseButton1Click)
+        if ok and connections and #connections > 0 then
+            local fired = false
+            for _, connection in ipairs(connections) do
+                if pcall(function() connection:Fire() end) then fired = true end
+            end
+            if fired then return true end
+        end
+    end
+    if not physicalOnly and firesignal and pcall(firesignal, button.MouseButton1Click) then return true end
+    local list = button:FindFirstAncestor("List")
+    if list and list:IsA("ScrollingFrame") then
+        local relativeY = button.AbsolutePosition.Y - list.AbsolutePosition.Y
+        list.CanvasPosition = Vector2.new(list.CanvasPosition.X, math.max(0, list.CanvasPosition.Y + relativeY - 30))
+        task.wait(0.1)
+    end
+    local x = button.AbsolutePosition.X + button.AbsoluteSize.X / 2
+    local y = button.AbsolutePosition.Y + button.AbsoluteSize.Y / 2
+    panel.Visible = false
+    local ok = pcall(function()
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+        task.wait(0.05)
+        VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+    end)
+    panel.Visible = true
+    return ok
+end
+
+local function waitFor(seconds, predicate)
+    local deadline = os.clock() + seconds
+    repeat
+        local value = predicate()
+        if value then return value end
+        task.wait(0.05)
+    until os.clock() >= deadline or not app.running
+end
+
+local staleSlots = setmetatable({}, { __mode = "k" })
+local lastPicker, pickerOpenedAt, appliedPicker, lastLoadoutAttempt = nil, 0, nil, -math.huge
+local lastItemLibraryAttempt = -math.huge
+local function instantLoadout(picker, choices)
+    local clientModules = playerScripts:FindFirstChild("Modules")
+    local pages = clientModules and clientModules:FindFirstChild("Pages")
+    local module = pages and pages:FindFirstChild(picker.Name)
+    if not module then return false, "picker module missing" end
+    local okRequire, page = pcall(require, module)
+    if not okRequire then return false, "picker module blocked: " .. tostring(page) end
+    if type(page) ~= "table" or page.PageFrame ~= picker or type(page.Finish) ~= "function"
+        or type(page._chosen_weapons) ~= "table" then
+        return false, "picker page not ready"
+    end
+    -- PickWeapon() calls player-data code that errors under this executor. Finish() only
+    -- submits the already chosen names and closes the game's picker.
+    for i, weapon in ipairs(choices) do page._chosen_weapons[i] = weapon end
+    local okFinish, err = pcall(function() page:Finish() end)
+    if not okFinish then return false, "Finish failed: " .. tostring(err) end
+    return true
+end
+
+local function tryLoadout()
+    local picker = openPicker()
+    if picker ~= lastPicker then
+        if lastPicker then
+            for _, slot in ipairs(chosenSlots(lastPicker)) do staleSlots[slot] = true end
+        end
+        lastPicker, appliedPicker = picker, nil
+        pickerOpenedAt = os.clock()
+    end
+    if not app.autoLoadout or not picker or appliedPicker == picker then return end
+    if os.clock() - pickerOpenedAt < 0.5 or os.clock() - lastLoadoutAttempt < 2 then return end
+    if not itemLibrary and os.clock() - lastItemLibraryAttempt >= 5 then
+        lastItemLibraryAttempt = os.clock()
+        itemLibrary = safeRequire(gameModule("ItemLibrary"))
+    end
+    local slots = chosenSlots(picker)
+    local slotCount = #slots
+    if slotCount == 0 or not itemLibrary then return end
+    for _, slot in ipairs(slots) do
+        if staleSlots[slot] then return end
+    end
+    local choices = {}
+    for i = 1, slotCount do
+        local entry = itemLibrary.SlotToClass and itemLibrary.SlotToClass[i]
+        local class = entry and entry.Name
+        local weapon, reason = class and resolveWeapon(selected[class], class)
+        if not weapon then
+            setStatus(reason or ("No weapon selected for slot " .. i))
+            return
+        end
+        choices[i] = weapon
+    end
+    lastLoadoutAttempt = os.clock()
+    local instant = instantLoadout(picker, choices)
+    if instant then
+        appliedPicker = picker
+        setStatus("Loadout sent instantly")
+        return
+    end
+    setStatus("Instant selection unavailable; trying clicks")
+    -- The game opens on slot one and advances slots after every weapon click.
+    -- Only reset to slot one if the player had already moved elsewhere.
+    local firstHover = slots[1].Button:FindFirstChild("Hover")
+    if firstHover and not firstHover.Visible then
+        if not click(slots[1].Button) then
+            setStatus("Cannot reset to the first weapon slot")
+            return
+        end
+    end
+    for i, weapon in ipairs(choices) do
+        local tile = waitFor(1.5, function() return weaponTile(picker, weapon) end)
+        if not tile then
+            setStatus(weapon .. " not selectable in slot " .. i)
+            return
+        end
+        if not click(tile) then
+            setStatus("Cannot click " .. weapon)
+            return
+        end
+        local moved = waitFor(0.5, function() return not tile.Parent or not openPicker() end)
+        if not moved then
+            if click(tile, true) then
+                moved = waitFor(1.5, function() return not tile.Parent or not openPicker() end)
+            end
+        end
+        if not moved then
+            setStatus(weapon .. " click did not register")
+            return
+        end
+        if i < #choices and not openPicker() then
+            setStatus("Picker closed before loadout finished")
+            return
+        end
+    end
+    appliedPicker = picker
+    setStatus("Loadout selected")
+end
+
+local lastQueueAttempt = -math.huge
+local lobbyReadySince
+local lastDuelLibraryAttempt, lastMatchmakingAttempt = -math.huge, -math.huge
+local queuesBuilt = false
+local function tryQueue()
+    if not app.autoQueue then lobbyReadySince = nil; return end
+    local main = mainFrame()
+    local lobby = main and main:FindFirstChild("Lobby")
+    local buttons = lobby and lobby:FindFirstChild("Buttons")
+    local search = lobby and lobby:FindFirstChild("Matchmaking")
+    search = search and search:FindFirstChild("Container")
+    local queuePad = main and main:FindFirstChild("Queue")
+    if not buttons or not shown(buttons) or buttons.AbsoluteSize.X == 0
+        or (search and shown(search)) or (queuePad and shown(queuePad)) or openPicker() then
+        lobbyReadySince = nil
+        return
+    end
+    if not lobbyReadySince then lobbyReadySince = os.clock(); return end
+    if os.clock() - lobbyReadySince < 2 or os.clock() - lastQueueAttempt < 15 then return end
+    if not duelLibrary and os.clock() - lastDuelLibraryAttempt >= 5 then
+        lastDuelLibraryAttempt = os.clock()
+        duelLibrary = safeRequire(gameModule("DuelLibrary"))
+    end
+    if not duelLibrary then return end
+    if not queuesBuilt then
+        queuesBuilt = true
+        buildQueues()
+        queueButton.Text = queues[queueIndex]
+            and (queues[queueIndex].mode .. " (" .. queues[queueIndex].label .. ")  ›")
+            or "Choose a mode  ›"
+        if queueSelectionError then setStatus(queueSelectionError) end
+    end
+    if not queueIndex then return end
+    if not matchmaking and os.clock() - lastMatchmakingAttempt >= 5 then
+        lastMatchmakingAttempt = os.clock()
+        matchmaking = safeRequire(gameController("MatchmakingController"))
+    end
+    if not matchmaking then return end
+    lastQueueAttempt = os.clock()
+    local queue = queues[queueIndex]
+    local ok, result = pcall(function() return matchmaking:QueueInto(queue.name) end)
+    if ok and result ~= false then
+        setStatus("Queueing: " .. queue.label)
+    else
+        setStatus("Queue failed; retrying later")
+    end
+end
+
+task.spawn(function()
+    while app.running do
+        local ok, err = pcall(function()
+            tryLoadout()
+            tryQueue()
+        end)
+        if not ok then setStatus("Waiting: " .. tostring(err)) end
+        task.wait(0.4)
+    end
+end)
+
+if queueSelectionError then
+    setStatus(queueSelectionError)
+else
+    setStatus("Waiting for lobby or weapon picker")
+end
