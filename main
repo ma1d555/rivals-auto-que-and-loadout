@@ -207,8 +207,18 @@ end
 label(panel, "Rivals • Queue + Loadout", UDim2.fromOffset(247, 30), UDim2.fromOffset(12, 7), 16)
 button("×", 265, 8, 27, function() app:Stop() end)
 local status = label(panel, "Ready", UDim2.fromOffset(280, 27), UDim2.fromOffset(12, 274), 12, Color3.fromRGB(180, 195, 215))
+local traceLines = {}
+local function trace(message)
+    if type(writefile) ~= "function" then return end
+    table.insert(traceLines, os.date("%H:%M:%S") .. " " .. message)
+    if #traceLines > 100 then table.remove(traceLines, 1) end
+    pcall(function() writefile("RivalsQueueLoadout-debug.txt", table.concat(traceLines, "\n")) end)
+end
 local function setStatus(message)
-    if app.running then status.Text = message end
+    if app.running and status.Text ~= message then
+        status.Text = message
+        trace(message)
+    end
 end
 
 local queueToggle = button("", 12, 46, 135, function()
@@ -446,6 +456,7 @@ end
 local lastQueueAttempt = -math.huge
 local lastSkipAttempt = -math.huge
 local lastExitAttempt = -math.huge
+local lastResultsTrace = -math.huge
 local lobbyReadySince
 local lastDuelLibraryAttempt = -math.huge
 local queuesBuilt = false
@@ -483,10 +494,34 @@ local function tryQueue()
     end
     local playAgain = container and container:FindFirstChild("PlayAgain")
     local playAgainButton = playAgain and playAgain:FindFirstChild("Button")
+    if results and shown(results) and os.clock() - lastResultsTrace >= 5 then
+        lastResultsTrace = os.clock()
+        local choices = {}
+        for _, candidate in ipairs(main:GetDescendants()) do
+            if candidate:IsA("GuiButton") and shown(candidate) and candidate.AbsoluteSize.X > 0 then
+                local title = candidate:FindFirstChild("Title", true)
+                local caption = title and title:IsA("TextLabel") and title.Text or ""
+                local lower = (candidate.Name .. " " .. caption):lower()
+                if lower:find("skip", 1, true) or lower:find("exit", 1, true)
+                    or lower:find("leave", 1, true) or lower:find("hub", 1, true)
+                    or lower:find("play again", 1, true) then
+                    table.insert(choices, candidate:GetFullName() .. " [" .. caption .. "]")
+                end
+            end
+        end
+        trace("Results controls: " .. (#choices > 0 and table.concat(choices, " | ") or "none visible"))
+    end
     if playAgainButton and shown(playAgainButton) and playAgainButton.AbsoluteSize.X > 0 then
         lobbyReadySince = nil
         if os.clock() - lastQueueAttempt >= 15 then
             lastQueueAttempt = os.clock()
+            local lobby = main:FindFirstChild("Lobby")
+            local play = lobby and lobby:FindFirstChild("Play")
+            local hubButton = play and play:FindFirstChild("Hub")
+            if hubButton and shown(hubButton) and hubButton.AbsoluteSize.X > 0 then
+                setStatus(click(hubButton) and "To Hub pressed" or "Could not press To Hub")
+                return
+            end
             local remotes = ReplicatedStorage:FindFirstChild("Remotes")
             local matchRemotes = remotes and remotes:FindFirstChild("Matchmaking")
             local backToHub = matchRemotes and matchRemotes:FindFirstChild("BackToHub")
@@ -542,8 +577,8 @@ end
 task.spawn(function()
     while app.running do
         local ok, err = pcall(function()
-            tryLoadout()
             tryQueue()
+            tryLoadout()
         end)
         if not ok then setStatus("Waiting: " .. tostring(err)) end
         task.wait(0.4)
