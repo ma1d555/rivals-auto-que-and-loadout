@@ -53,7 +53,7 @@ local function safeRequire(module)
 end
 
 -- Never require game modules while its own interface is still starting up.
-local itemLibrary, duelLibrary, matchmaking
+local itemLibrary, duelLibrary
 local function gameModule(name)
     local folder = ReplicatedStorage:FindFirstChild("Modules")
     return folder and folder:FindFirstChild(name)
@@ -445,7 +445,7 @@ end
 
 local lastQueueAttempt = -math.huge
 local lobbyReadySince
-local lastDuelLibraryAttempt, lastMatchmakingAttempt = -math.huge, -math.huge
+local lastDuelLibraryAttempt = -math.huge
 local queuesBuilt = false
 local function tryQueue()
     if not app.autoQueue then lobbyReadySince = nil; return end
@@ -463,11 +463,15 @@ local function tryQueue()
         lobbyReadySince = nil
         if os.clock() - lastQueueAttempt >= 15 then
             lastQueueAttempt = os.clock()
-            if click(playAgainButton) then
-                setStatus("Play Again pressed; waiting for queue")
-            else
-                setStatus("Could not press Play Again")
+            local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+            local matchRemotes = remotes and remotes:FindFirstChild("Matchmaking")
+            local playAgainRemote = matchRemotes and matchRemotes:FindFirstChild("PlayAgain")
+            if not playAgainRemote or not playAgainRemote:IsA("RemoteEvent") then
+                setStatus("Play Again remote unavailable")
+                return
             end
+            local ok = pcall(function() playAgainRemote:FireServer() end)
+            setStatus(ok and "Play Again sent; waiting for queue" or "Play Again remote failed")
         end
         return
     end
@@ -497,14 +501,13 @@ local function tryQueue()
         if queueSelectionError then setStatus(queueSelectionError) end
     end
     if not queueIndex then return end
-    if not matchmaking and os.clock() - lastMatchmakingAttempt >= 5 then
-        lastMatchmakingAttempt = os.clock()
-        matchmaking = safeRequire(gameController("MatchmakingController"))
-    end
-    if not matchmaking then return end
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    local matchRemotes = remotes and remotes:FindFirstChild("Matchmaking")
+    local joinQueue = matchRemotes and matchRemotes:FindFirstChild("JoinQueue")
+    if not joinQueue or not joinQueue:IsA("RemoteFunction") then return end
     lastQueueAttempt = os.clock()
     local queue = queues[queueIndex]
-    local ok, result = pcall(function() return matchmaking:QueueInto(queue.name) end)
+    local ok, result = pcall(function() return joinQueue:InvokeServer(queue.name) end)
     if ok and result ~= false then
         setStatus("Queueing: " .. queue.label)
     else
