@@ -450,6 +450,27 @@ local queuesBuilt = false
 local function tryQueue()
     if not app.autoQueue then lobbyReadySince = nil; return end
     local main = mainFrame()
+    -- The lobby Play button is not shown after a match. Use the game's own
+    -- Play Again button when final results are on screen instead.
+    local pages = main and main:FindFirstChild("Pages")
+    local results = pages and pages:FindFirstChild("FinalResults")
+    local resultButtons = results and results:FindFirstChild("Buttons")
+    local bottomRight = resultButtons and resultButtons:FindFirstChild("BottomRight")
+    local container = bottomRight and bottomRight:FindFirstChild("Container")
+    local playAgain = container and container:FindFirstChild("PlayAgain")
+    local playAgainButton = playAgain and playAgain:FindFirstChild("Button")
+    if playAgainButton and shown(playAgainButton) and playAgainButton.AbsoluteSize.X > 0 then
+        lobbyReadySince = nil
+        if os.clock() - lastQueueAttempt >= 15 then
+            lastQueueAttempt = os.clock()
+            if click(playAgainButton) then
+                setStatus("Play Again pressed; waiting for queue")
+            else
+                setStatus("Could not press Play Again")
+            end
+        end
+        return
+    end
     local lobby = main and main:FindFirstChild("Lobby")
     local buttons = lobby and lobby:FindFirstChild("Buttons")
     local search = lobby and lobby:FindFirstChild("Matchmaking")
