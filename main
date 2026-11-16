@@ -1,4 +1,10 @@
 -- Standalone Rivals auto-queue + auto-loadout. Run once per client; rerunning replaces it.
+--
+-- All you need in the executor:
+--   getgenv().RivalsQueueLoadoutConfig = { AutoQueue = true, AutoLoadout = true, Queue = "5s",
+--       Primary = "Shotgun", Secondary = "Uzi", Melee = "Fists", Utility = "Grenade" }
+--   loadstring(game:HttpGet("https://raw.githubusercontent.com/ma1d555/rivals-auto-que-and-loadout/main/main"))()
+-- (weapon names: see README.md)
 local env = getgenv()
 if env.RivalsQueueLoadout and env.RivalsQueueLoadout.Stop then
     pcall(function() env.RivalsQueueLoadout:Stop() end)
@@ -7,9 +13,81 @@ end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualInputManager = game:GetService("VirtualInputManager")
+if not game:IsLoaded() then game.Loaded:Wait() end
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local playerScripts = player:WaitForChild("PlayerScripts")
+
+-- Wait until Rivals' own interface is usable (lobby, weapon picker or results
+-- screen, and no teleport overlay) before touching it: requiring the game's
+-- modules while its UI is still starting up breaks it. This used to live in
+-- every loader; now it's here, so the loader is two lines.
+do
+    local function loaderStatus(message)
+        if type(writefile) == "function" then
+            pcall(writefile, "RivalsQueueLoadout-loader.txt", message)
+        end
+    end
+
+    local function isShown(object)
+        local node = object
+        while node and node:IsA("GuiObject") do
+            if not node.Visible then return false end
+            node = node.Parent
+        end
+        return node ~= nil and (not node:IsA("LayerCollector") or node.Enabled)
+    end
+
+    local function onScreen(object)
+        if not object or not isShown(object) or object.AbsoluteSize.X <= 0 or object.AbsoluteSize.Y <= 0 then
+            return false
+        end
+        local camera = workspace.CurrentCamera
+        local viewport = camera and camera.ViewportSize
+        if not viewport then return false end
+        local position, size = object.AbsolutePosition, object.AbsoluteSize
+        return position.X < viewport.X and position.Y < viewport.Y
+            and position.X + size.X > 0 and position.Y + size.Y > 0
+    end
+
+    local function find(root, ...)
+        local node = root
+        for _, name in ipairs({ ... }) do
+            node = node and node:FindFirstChild(name)
+        end
+        return node
+    end
+
+    local LEAVE_TITLES = { Skip = true, Exit = true, Leave = true, ["To Hub"] = true, ["Back to Hub"] = true }
+
+    local function gameReady()
+        local mainFrame = find(playerGui, "MainGui", "MainFrame")
+        if not mainFrame then return false end
+        local results = find(mainFrame, "DuelInterfaces", "DuelInterface", "FinalResults", "Buttons", "BottomRight", "Container")
+        local leaveButton = find(results, "Leave", "Button")
+        local leaveTitle = find(leaveButton, "Title")
+        local pages = mainFrame:FindFirstChild("Pages")
+        local picker = pages and (pages:FindFirstChild("PickWeapons") or pages:FindFirstChild("PickWeaponsList"))
+        local usable = onScreen(find(mainFrame, "Lobby", "Buttons"))
+            or onScreen(find(results, "PlayAgain", "Button"))
+            or onScreen(picker)
+            or (leaveTitle and LEAVE_TITLES[leaveTitle.Text] and onScreen(leaveButton))
+        if not usable then return false end
+
+        local overlay = find(playerGui, "TeleportingGui", "Teleporting", "Container")
+        local teleportGui = playerGui:FindFirstChild("TeleportingGui")
+        if teleportGui and teleportGui.Enabled and overlay and overlay.Visible then return false end
+        local mainOverlay = find(mainFrame, "Teleporting", "Container")
+        if mainOverlay and mainOverlay.Visible then return false end
+        return true
+    end
+
+    loaderStatus("Waiting for a usable Rivals screen")
+    repeat task.wait(1) until gameReady()
+    task.wait(3)
+    repeat task.wait(1) until gameReady()
+    loaderStatus("script started")
+end
 
 local config = type(env.RivalsQueueLoadoutConfig) == "table" and env.RivalsQueueLoadoutConfig or {}
 local app = {
@@ -430,6 +508,22 @@ queueButton.Text = queues[queueIndex]
 
 new("Frame", { Size = UDim2.new(1, -36, 0, 1), Position = UDim2.fromOffset(18, 176), BackgroundColor3 = THEME.stroke, BorderSizePixel = 0 }, panel)
 
+-- Rivals only takes a loadout in its weapon picker (start of a match). A change
+-- made any other time is saved and sent at the next pick; say so once you stop
+-- clicking through weapons, instead of looking like nothing happened.
+local loadoutHintToken = 0
+local function hintLoadoutSaved()
+    loadoutHintToken = loadoutHintToken + 1
+    local token = loadoutHintToken
+    task.delay(1.5, function()
+        if token ~= loadoutHintToken or not app.running then return end
+        if openPicker() then return end   -- picker is open: it's sent right away anyway
+        local parts = {}
+        for _, c in ipairs(classes) do table.insert(parts, selected[c]) end
+        toast("Loadout saved", table.concat(parts, " · ") .. "\nApplies at the next weapon pick", { color = THEME.accent, duration = 5 })
+    end)
+end
+
 local slotButtons = {}
 for i, class in ipairs(classes) do
     local y = 186 + (i - 1) * 34
@@ -440,6 +534,7 @@ for i, class in ipairs(classes) do
         local index = table.find(options, selected[class]) or 0
         selected[class] = options[index % #options + 1]
         slotButton.Text = selected[class] .. "  ›"
+        hintLoadoutSaved()
     end)
     slotButton.Text = selected[class] .. "  ›"
     slotButtons[class] = slotButton
