@@ -158,55 +158,221 @@ local function openPicker()
     end
 end
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "RivalsQueueLoadout"
-gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = playerGui
+--================ UI (same style as the toasts) ================
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
-local panel = Instance.new("Frame")
-panel.Name = "Panel"
-panel.Size = UDim2.fromOffset(302, 306)
-panel.Position = UDim2.new(0, 18, 0.5, -153)
-panel.BackgroundColor3 = Color3.fromRGB(23, 25, 34)
-panel.BorderSizePixel = 0
-panel.Active = true
-panel.Draggable = true
-panel.Parent = gui
-Instance.new("UICorner", panel).CornerRadius = UDim.new(0, 10)
+local THEME = {
+    background = Color3.fromRGB(22, 22, 28),
+    surface    = Color3.fromRGB(32, 32, 40),
+    hover      = Color3.fromRGB(42, 42, 54),
+    stroke     = Color3.fromRGB(55, 55, 70),
+    title      = Color3.fromRGB(240, 240, 245),
+    text       = Color3.fromRGB(170, 170, 185),
+    accent     = Color3.fromRGB(139, 92, 246),   -- the panel's own colour
+    good       = Color3.fromRGB(34, 197, 94),
+    bad        = Color3.fromRGB(239, 68, 68),
+    idle       = Color3.fromRGB(75, 75, 90),
+}
 
-local function label(parent, text, size, position, fontSize, color)
-    local object = Instance.new("TextLabel")
-    object.BackgroundTransparency = 1
-    object.Text = text
-    object.Font = Enum.Font.Gotham
-    object.TextSize = fontSize or 14
-    object.TextColor3 = color or Color3.fromRGB(235, 238, 245)
-    object.TextXAlignment = Enum.TextXAlignment.Left
-    object.Size, object.Position = size, position
-    object.Parent = parent
+local function new(className, props, parent)
+    local obj = Instance.new(className)
+    for k, v in pairs(props) do obj[k] = v end
+    obj.Parent = parent
+    return obj
+end
+
+local function tween(obj, seconds, props)
+    TweenService:Create(obj, TweenInfo.new(seconds, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), props):Play()
+end
+
+-- Toasts: shared through getgenv().toast, so every script in this client (this
+-- one, teams.lua, ...) uses one stack in the bottom-right corner.
+local toast = env.toast
+if type(toast) ~= "function" then
+    local function toastParent()
+        if gethui then return gethui() end
+        local ok, core = pcall(function() return game:GetService("CoreGui") end)
+        if ok and core then return core end
+        return playerGui
+    end
+    local oldToasts = toastParent():FindFirstChild("Toasts")
+    if oldToasts then oldToasts:Destroy() end
+
+    local toastGui = new("ScreenGui", { Name = "Toasts", ResetOnSpawn = false, DisplayOrder = 1000, IgnoreGuiInset = true }, toastParent())
+    local holder = new("Frame", {
+        AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -16, 1, -16),
+        Size = UDim2.new(0, 300, 1, -32), BackgroundTransparency = 1,
+    }, toastGui)
+    new("UIListLayout", {
+        VerticalAlignment = Enum.VerticalAlignment.Bottom, HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8),
+    }, holder)
+
+    local order = 0
+    toast = function(title, text, options)
+        options = options or {}
+        order = order + 1
+        local slot = new("Frame", { Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, LayoutOrder = order }, holder)
+        local card = new("CanvasGroup", {
+            Size = UDim2.new(1, 0, 1, 0), Position = UDim2.new(0, 40, 0, 0),
+            BackgroundColor3 = THEME.background, GroupTransparency = 1,
+        }, slot)
+        new("UICorner", { CornerRadius = UDim.new(0, 10) }, card)
+        new("UIStroke", { Color = THEME.stroke, Thickness = 1 }, card)
+        new("Frame", { Size = UDim2.new(0, 4, 1, 0), BackgroundColor3 = options.color or THEME.accent, BorderSizePixel = 0 }, card)
+
+        local textLeft = 16
+        if options.image then
+            local icon = new("ImageLabel", {
+                Size = UDim2.new(0, 40, 0, 40), Position = UDim2.new(0, 14, 0.5, 0), AnchorPoint = Vector2.new(0, 0.5),
+                BackgroundColor3 = THEME.stroke, Image = options.image,
+            }, card)
+            new("UICorner", { CornerRadius = UDim.new(1, 0) }, icon)
+            textLeft = 64
+        end
+        new("TextLabel", {
+            Text = title, Font = Enum.Font.GothamBold, TextSize = 15, TextColor3 = THEME.title,
+            TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1, TextTruncate = Enum.TextTruncate.AtEnd,
+            Position = UDim2.new(0, textLeft, 0, 10), Size = UDim2.new(1, -textLeft - 12, 0, 18),
+        }, card)
+        new("TextLabel", {
+            Text = text or "", Font = Enum.Font.Gotham, TextSize = 13, TextColor3 = THEME.text,
+            TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextWrapped = true,
+            BackgroundTransparency = 1, Position = UDim2.new(0, textLeft, 0, 30), Size = UDim2.new(1, -textLeft - 12, 0, 30),
+        }, card)
+
+        tween(card, 0.25, { Position = UDim2.new(0, 0, 0, 0), GroupTransparency = 0 })
+        task.delay(options.duration or 5, function()
+            local out = TweenService:Create(card, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+                { Position = UDim2.new(0, 40, 0, 0), GroupTransparency = 1 })
+            out:Play()
+            out.Completed:Wait()
+            slot:Destroy()
+        end)
+    end
+    env.toast = toast
+end
+
+-- The panel ------------------------------------------------------------------
+local gui = new("ScreenGui", { Name = "RivalsQueueLoadout", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, playerGui)
+
+local panel = new("Frame", {
+    Name = "Panel", Size = UDim2.fromOffset(300, 360), Position = UDim2.new(0, 18, 0.5, -180),
+    BackgroundColor3 = THEME.background, BorderSizePixel = 0, Active = true,
+}, gui)
+new("UICorner", { CornerRadius = UDim.new(0, 12) }, panel)
+new("UIStroke", { Color = THEME.stroke, Thickness = 1 }, panel)
+new("Frame", { Size = UDim2.new(0, 4, 1, -24), Position = UDim2.fromOffset(0, 12), BackgroundColor3 = THEME.accent, BorderSizePixel = 0 }, panel)
+
+-- header: title, subtitle, close button; drag the panel by it
+local header = new("Frame", { Size = UDim2.new(1, 0, 0, 50), BackgroundTransparency = 1, Active = true }, panel)
+new("TextLabel", {
+    Text = "Rivals", Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = THEME.title,
+    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(18, 10), Size = UDim2.fromOffset(200, 18),
+}, header)
+new("TextLabel", {
+    Text = "Queue + Loadout", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = THEME.text,
+    TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
+    Position = UDim2.fromOffset(18, 28), Size = UDim2.fromOffset(200, 14),
+}, header)
+local closeButton = new("TextButton", {
+    Text = "×", Font = Enum.Font.GothamBold, TextSize = 18, TextColor3 = THEME.text,
+    BackgroundColor3 = THEME.surface, BackgroundTransparency = 1, AutoButtonColor = false,
+    Position = UDim2.new(1, -38, 0, 12), Size = UDim2.fromOffset(26, 26),
+}, header)
+new("UICorner", { CornerRadius = UDim.new(0, 6) }, closeButton)
+connect(closeButton.MouseEnter, function() tween(closeButton, 0.15, { BackgroundTransparency = 0, BackgroundColor3 = THEME.bad, TextColor3 = THEME.title }) end)
+connect(closeButton.MouseLeave, function() tween(closeButton, 0.15, { BackgroundTransparency = 1, TextColor3 = THEME.text }) end)
+connect(closeButton.MouseButton1Click, function() app:Stop() end)
+
+new("Frame", { Size = UDim2.new(1, -36, 0, 1), Position = UDim2.fromOffset(18, 50), BackgroundColor3 = THEME.stroke, BorderSizePixel = 0 }, panel)
+
+do -- dragging
+    local dragging, dragStart, startPos
+    connect(header.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, dragStart, startPos = true, input.Position, panel.Position
+        end
+    end)
+    connect(UserInputService.InputChanged, function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            panel.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+    connect(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+local function rowLabel(text, y)
+    return new("TextLabel", {
+        Text = text, Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = THEME.text,
+        TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1,
+        Position = UDim2.fromOffset(18, y), Size = UDim2.fromOffset(90, 30),
+    }, panel)
+end
+
+-- an on/off switch; returns a function that redraws it
+local function switch(text, y, getValue, onClick)
+    rowLabel(text, y)
+    local track = new("TextButton", {
+        Text = "", AutoButtonColor = false, BackgroundColor3 = THEME.idle,
+        Position = UDim2.new(1, -62, 0, y + 5), Size = UDim2.fromOffset(44, 22),
+    }, panel)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, track)
+    local knob = new("Frame", {
+        BackgroundColor3 = THEME.title, Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(3, 3),
+    }, track)
+    new("UICorner", { CornerRadius = UDim.new(1, 0) }, knob)
+    local shownValue
+    local function redraw()
+        local on = getValue()
+        if on == shownValue then return end
+        shownValue = on
+        tween(track, 0.2, { BackgroundColor3 = on and THEME.good or THEME.idle })
+        tween(knob, 0.2, { Position = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3) })
+    end
+    connect(track.MouseButton1Click, function()
+        onClick()
+        redraw()
+    end)
+    redraw()
+    return redraw
+end
+
+-- a row with a value you click through; returns its button (set .Text on it)
+local function picker(text, y, onClick)
+    rowLabel(text, y)
+    local object = new("TextButton", {
+        Text = "", Font = Enum.Font.GothamMedium, TextSize = 13, TextColor3 = THEME.title,
+        TextXAlignment = Enum.TextXAlignment.Left, AutoButtonColor = false, BackgroundColor3 = THEME.surface,
+        Position = UDim2.fromOffset(108, y), Size = UDim2.new(1, -126, 0, 30),
+    }, panel)
+    new("UICorner", { CornerRadius = UDim.new(0, 8) }, object)
+    new("UIStroke", { Color = THEME.stroke, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, object)
+    new("UIPadding", { PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, object)
+    connect(object.MouseEnter, function() tween(object, 0.15, { BackgroundColor3 = THEME.hover }) end)
+    connect(object.MouseLeave, function() tween(object, 0.15, { BackgroundColor3 = THEME.surface }) end)
+    connect(object.MouseButton1Click, onClick)
     return object
 end
 
-local function button(text, x, y, width, callback)
-    local object = Instance.new("TextButton")
-    object.Text = text
-    object.Font = Enum.Font.GothamMedium
-    object.TextSize = 13
-    object.TextColor3 = Color3.fromRGB(242, 244, 250)
-    object.BackgroundColor3 = Color3.fromRGB(46, 51, 67)
-    object.BorderSizePixel = 0
-    object.Size = UDim2.fromOffset(width, 28)
-    object.Position = UDim2.fromOffset(x, y)
-    object.Parent = panel
-    Instance.new("UICorner", object).CornerRadius = UDim.new(0, 6)
-    connect(object.MouseButton1Click, callback)
-    return object
-end
+-- status line with a coloured dot
+local statusDot = new("Frame", {
+    BackgroundColor3 = THEME.idle, Size = UDim2.fromOffset(8, 8), Position = UDim2.new(0, 18, 1, -24),
+}, panel)
+new("UICorner", { CornerRadius = UDim.new(1, 0) }, statusDot)
+local status = new("TextLabel", {
+    Text = "Ready", Font = Enum.Font.Gotham, TextSize = 12, TextColor3 = THEME.text,
+    TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, BackgroundTransparency = 1,
+    Position = UDim2.new(0, 32, 1, -30), Size = UDim2.new(1, -50, 0, 20),
+}, panel)
 
-label(panel, "Rivals • Queue + Loadout", UDim2.fromOffset(247, 30), UDim2.fromOffset(12, 7), 16)
-button("×", 265, 8, 27, function() app:Stop() end)
-local status = label(panel, "Ready", UDim2.fromOffset(280, 27), UDim2.fromOffset(12, 274), 12, Color3.fromRGB(180, 195, 215))
 local traceLines = {}
 local function trace(message)
     if type(writefile) ~= "function" then return end
@@ -214,30 +380,44 @@ local function trace(message)
     if #traceLines > 100 then table.remove(traceLines, 1) end
     pcall(function() writefile("RivalsQueueLoadout-debug.txt", table.concat(traceLines, "\n")) end)
 end
+
+-- which status messages are good / bad news (dot colour, and which get a toast)
+local GOOD = { "^Queueing", "^Loadout sent", "^Loadout selected", "^Returning to lobby" }
+local BAD = { "fail", "^Cannot", "^Could not", "unavailable", "not selectable", "did not register", "closed before", "not in the" }
+local function statusKind(message)
+    for _, pattern in ipairs(GOOD) do if message:find(pattern) then return "good" end end
+    for _, pattern in ipairs(BAD) do if message:find(pattern) then return "bad" end end
+    return "idle"
+end
+
 local function setStatus(message)
     if app.running and status.Text ~= message then
         status.Text = message
         trace(message)
+        local kind = statusKind(message)
+        tween(statusDot, 0.2, { BackgroundColor3 = THEME[kind] })
+        if kind ~= "idle" then
+            toast(kind == "good" and "Queue + Loadout" or "Queue + Loadout: problem", message,
+                { color = THEME[kind], duration = kind == "good" and 4 or 6 })
+        end
     end
 end
 
-local queueToggle = button("", 12, 46, 135, function()
+-- settings ----------------------------------------------------------------------
+local redrawQueueSwitch = switch("Auto queue", 62, function() return app.autoQueue end, function()
     app.autoQueue = not app.autoQueue
-    app.refreshToggles()
 end)
-local loadoutToggle = button("", 155, 46, 135, function()
+local redrawLoadoutSwitch = switch("Auto loadout", 96, function() return app.autoLoadout end, function()
     app.autoLoadout = not app.autoLoadout
-    app.refreshToggles()
 end)
+-- also called every loop, so the switch follows when another script (multi's queue gate) flips autoQueue
 function app.refreshToggles()
-    queueToggle.Text = "Auto queue: " .. (app.autoQueue and "ON" or "OFF")
-    loadoutToggle.Text = "Auto loadout: " .. (app.autoLoadout and "ON" or "OFF")
+    redrawQueueSwitch()
+    redrawLoadoutSwitch()
 end
-app.refreshToggles()
 
-label(panel, "Queue", UDim2.fromOffset(75, 26), UDim2.fromOffset(12, 85), 13)
 local queueButton
-queueButton = button("", 87, 84, 203, function()
+queueButton = picker("Queue", 136, function()
     if #queues == 0 then return end
     queueIndex = (queueIndex or 0) % #queues + 1
     queueSelectionError = nil
@@ -248,12 +428,13 @@ queueButton.Text = queues[queueIndex]
     and (queues[queueIndex].mode .. " (" .. queues[queueIndex].label .. ")  ›")
     or (queueSelectionError and "Choose a mode  ›" or "No standard queues")
 
+new("Frame", { Size = UDim2.new(1, -36, 0, 1), Position = UDim2.fromOffset(18, 176), BackgroundColor3 = THEME.stroke, BorderSizePixel = 0 }, panel)
+
 local slotButtons = {}
 for i, class in ipairs(classes) do
-    local y = 118 + (i - 1) * 36
-    label(panel, class, UDim2.fromOffset(75, 27), UDim2.fromOffset(12, y), 13)
+    local y = 186 + (i - 1) * 34
     local slotButton
-    slotButton = button("", 87, y, 203, function()
+    slotButton = picker(class, y, function()
         local options = weaponOptions(class)
         if #options == 0 then return end
         local index = table.find(options, selected[class]) or 0
@@ -597,6 +778,7 @@ task.spawn(function()
             tryLoadout()
         end)
         if not ok then setStatus("Waiting: " .. tostring(err)) end
+        app.refreshToggles()   -- the switches follow if another script changed autoQueue/autoLoadout
         task.wait(0.4)
     end
 end)
